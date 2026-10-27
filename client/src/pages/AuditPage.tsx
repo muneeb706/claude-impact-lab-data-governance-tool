@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import type { AuditEntry, Manager } from '../../../shared/types';
 import { useApi } from '../api';
-import { EmptyState, ErrorBanner, Loading, PageHeader } from '../components/ui';
+import { Badge, EmptyState, ErrorBanner, Loading, PageHeader } from '../components/ui';
 import { formatDateTime } from '../format';
 
 const FILTERS = [
@@ -12,6 +12,7 @@ const FILTERS = [
   { value: 'user', label: 'Members' },
   { value: 'policy', label: 'Policies' },
   { value: 'manager', label: 'Managers' },
+  { value: 'dataset', label: 'Datasets' },
 ];
 
 export default function AuditPage() {
@@ -37,7 +38,7 @@ export default function AuditPage() {
     <>
       <PageHeader
         title="Audit log"
-        description="Every change to accounts, roles, members, policies and managers, with the account manager who made it. Newest first."
+        description="Every change to accounts, roles, members, policies, managers and datasets, with the person who made it. Newest first."
       />
       <div className="toolbar">
         <div className="segmented" role="tablist" aria-label="Filter by type">
@@ -109,7 +110,9 @@ function AuditRow({ entry, expanded, onToggle }: { entry: AuditEntry; expanded: 
       <tr className={hasDetails ? 'clickable' : undefined} onClick={hasDetails ? onToggle : undefined}>
         <td className="muted nowrap">{formatDateTime(entry.createdAt)}</td>
         <td>
-          <div className="row-title">{entry.actor}</div>
+          <div className="row-title">
+            {entry.actor} {entry.actorKind === 'member' && <Badge>Member</Badge>}
+          </div>
           {entry.actorEmail && <div className="row-sub">{entry.actorEmail}</div>}
         </td>
         <td>

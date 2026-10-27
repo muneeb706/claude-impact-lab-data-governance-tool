@@ -1,9 +1,9 @@
-import type { Manager } from '../../shared/types';
+import type { AuditActor } from './auth';
 import type { DB } from './db';
 
 export function recordAudit(
   db: DB,
-  actor: Pick<Manager, 'id' | 'name' | 'email'>,
+  actor: AuditActor,
   entry: {
     action: string;
     entityType: string;
@@ -13,10 +13,12 @@ export function recordAudit(
   },
 ): void {
   db.prepare(
-    `INSERT INTO audit_log (actor_id, actor, actor_email, action, entity_type, entity_id, summary, details)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO audit_log (actor_kind, actor_id, actor_user_id, actor, actor_email, action, entity_type, entity_id, summary, details)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
-    actor.id,
+    actor.kind,
+    actor.kind === 'manager' ? actor.id : null,
+    actor.kind === 'member' ? actor.id : null,
     actor.name,
     actor.email,
     entry.action,

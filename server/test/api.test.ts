@@ -17,7 +17,7 @@ import type {
 import { createApp } from '../src/app';
 import { openDatabase, type DB } from '../src/db';
 import { MIGRATIONS } from '../src/schema';
-import { POLICY_CATALOG } from '../src/seed';
+import { POLICY_CATALOG, SYSTEM_ROLES } from '../src/seed';
 
 // Test-only credentials. Also used for local manual testing against a scratch database.
 const FIRST_MANAGER = { name: 'Morgan Admin', email: 'morgan@example.test', password: 'correct-horse-battery' };
@@ -82,7 +82,8 @@ async function policyIdsByCode(codes: string[]): Promise<number[]> {
 
 async function systemRole(accountType: 'academic' | 'industry'): Promise<Role> {
   const { body } = await admin<Role[]>('GET', `/roles?accountType=${accountType}`);
-  const role = body.find((r) => r.isSystem);
+  const name = accountType === 'academic' ? 'Principal Investigator' : 'Director';
+  const role = body.find((r) => r.isSystem && r.name === name);
   assert.ok(role);
   return role;
 }
@@ -95,7 +96,7 @@ async function latestAudit(): Promise<AuditEntry> {
 describe('sign-in', () => {
   test('asks for setup on first run and rejects unauthenticated requests', async () => {
     const session = await anon()<SessionInfo>('GET', '/auth/session');
-    assert.deepEqual(session.body, { manager: null, needsSetup: true });
+    assert.deepEqual(session.body, { manager: null, member: null, needsSetup: true });
     assert.equal((await anon()('GET', '/accounts')).status, 401);
     assert.equal((await anon()('GET', '/audit')).status, 401);
   });
@@ -463,7 +464,7 @@ test('re-opening a database is idempotent and keeps manager edits and custom pol
       .get(piId);
     const version = second.pragma('user_version', { simple: true });
     second.close();
-    assert.deepEqual(counts, { builtIn: POLICY_CATALOG.length, custom: 1, roles: 2, piPolicies: 0 });
+    assert.deepEqual(counts, { builtIn: POLICY_CATALOG.length, custom: 1, roles: SYSTEM_ROLES.length, piPolicies: 0 });
     assert.equal(version, MIGRATIONS.length);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });

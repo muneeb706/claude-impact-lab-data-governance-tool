@@ -1,6 +1,6 @@
-import { useState, type FormEvent } from 'react';
+import { Fragment, useState, type FormEvent } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import type { Account, Role, User, UserWithPolicies } from '../../../shared/types';
+import { MIN_PASSWORD_LENGTH, type Account, type Role, type User, type UserWithPolicies } from '../../../shared/types';
 import { api, ApiRequestError, errorMessage, useApi } from '../api';
 import { PolicyList } from '../components/PolicyChecklist';
 import {
@@ -24,6 +24,8 @@ export default function AccountDetailPage() {
   const [editing, setEditing] = useState(false);
   const [selectedUserId, setSelectedUserId] = useState<number | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [passwordFor, setPasswordFor] = useState<number | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   if (account.error) return <ErrorBanner message={account.error} />;
   if (!account.data) return <Loading />;
@@ -104,6 +106,7 @@ export default function AccountDetailPage() {
         />
       )}
 
+      {notice && <div className="banner banner-success">{notice}</div>}
       <ErrorBanner message={actionError ?? users.error ?? roles.error} />
 
       <div className={`split${selectedUserId ? ' with-panel' : ''}`}>
@@ -137,47 +140,78 @@ export default function AccountDetailPage() {
                 </thead>
                 <tbody>
                   {users.data.map((user) => (
-                    <tr key={user.id} className={selectedUserId === user.id ? 'selected' : undefined}>
-                      <td>
-                        <button
-                          className="row-title link-button"
-                          title="View effective policies"
-                          onClick={() => setSelectedUserId(user.id)}
-                        >
-                          {user.name}
-                        </button>
-                        <div className="row-sub">{user.email}</div>
-                      </td>
-                      <td>
-                        <select
-                          aria-label={`Role for ${user.name}`}
-                          value={user.roleId}
-                          onChange={(e) => updateUser(user, { roleId: Number(e.target.value) })}
-                        >
-                          {roles.data?.map((role) => (
-                            <option key={role.id} value={role.id}>
-                              {role.name}
-                            </option>
-                          ))}
-                        </select>
-                      </td>
-                      <td>
-                        <Badge tone={user.status === 'active' ? 'success' : 'warning'}>{user.status === 'active' ? 'Active' : 'Suspended'}</Badge>
-                      </td>
-                      <td>
-                        <div className="row-actions">
+                    <Fragment key={user.id}>
+                      <tr className={selectedUserId === user.id ? 'selected' : undefined}>
+                        <td>
                           <button
-                            className="btn btn-small"
-                            onClick={() => updateUser(user, { status: user.status === 'active' ? 'suspended' : 'active' })}
+                            className="row-title link-button"
+                            title="View effective policies"
+                            onClick={() => setSelectedUserId(user.id)}
                           >
-                            {user.status === 'active' ? 'Suspend' : 'Reactivate'}
+                            {user.name}
                           </button>
-                          <ConfirmButton className="btn btn-small btn-danger-ghost" onConfirm={() => removeUser(user)} confirmLabel="Remove?">
-                            Remove
-                          </ConfirmButton>
-                        </div>
-                      </td>
-                    </tr>
+                          <div className="row-sub">{user.email}</div>
+                        </td>
+                        <td>
+                          <select
+                            aria-label={`Role for ${user.name}`}
+                            value={user.roleId}
+                            onChange={(e) => updateUser(user, { roleId: Number(e.target.value) })}
+                          >
+                            {roles.data?.map((role) => (
+                              <option key={role.id} value={role.id}>
+                                {role.name}
+                              </option>
+                            ))}
+                          </select>
+                        </td>
+                        <td>
+                          <Badge tone={user.status === 'active' ? 'success' : 'warning'}>
+                            {user.status === 'active' ? 'Active' : 'Suspended'}
+                          </Badge>
+                          <div className="row-sub">{user.canSignIn ? 'Can sign in' : 'No sign-in yet'}</div>
+                        </td>
+                        <td>
+                          <div className="row-actions">
+                            <button
+                              className="btn btn-small"
+                              onClick={() => setPasswordFor(passwordFor === user.id ? null : user.id)}
+                            >
+                              {passwordFor === user.id ? 'Cancel' : user.canSignIn ? 'Reset password' : 'Set password'}
+                            </button>
+                            <button
+                              className="btn btn-small"
+                              onClick={() =>
+                                updateUser(user, { status: user.status === 'active' ? 'suspended' : 'active' })
+                              }
+                            >
+                              {user.status === 'active' ? 'Suspend' : 'Reactivate'}
+                            </button>
+                            <ConfirmButton
+                              className="btn btn-small btn-danger-ghost"
+                              onConfirm={() => removeUser(user)}
+                              confirmLabel="Remove?"
+                            >
+                              Remove
+                            </ConfirmButton>
+                          </div>
+                        </td>
+                      </tr>
+                      {passwordFor === user.id && (
+                        <tr className="row-expansion">
+                          <td colSpan={4}>
+                            <SetPasswordForm
+                              user={user}
+                              onDone={async () => {
+                                setPasswordFor(null);
+                                setNotice(`${user.name} can now sign in with the password you set.`);
+                                await users.reload();
+                              }}
+                            />
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
                   ))}
                 </tbody>
               </table>
@@ -270,7 +304,13 @@ function AddUserForm({ account, roles, onAdded }: { account: Account; roles: Rol
   return (
     <form className="inline-form" onSubmit={submit}>
       <Field label="Name" error={error?.field === 'name' ? error.message : null}>
-        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Full name" required maxLength={120} />
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="Full name"
+          required
+          maxLength={120}
+        />
       </Field>
       <Field label="Email" error={error?.field === 'email' ? error.message : null}>
         <input
@@ -324,5 +364,46 @@ function UserPolicyPanel({ userId, onClose }: { userId: number; onClose: () => v
       <ErrorBanner message={error} />
       {user ? <PolicyList policies={user.policies} /> : !error && <Loading />}
     </aside>
+  );
+}
+
+function SetPasswordForm({ user, onDone }: { user: User; onDone: () => Promise<void> }) {
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    setSaving(true);
+    try {
+      await api.patch(`/users/${user.id}`, { password });
+      await onDone();
+    } catch (err) {
+      setError(errorMessage(err));
+      setSaving(false);
+    }
+  }
+
+  return (
+    <form className="reset-form" onSubmit={submit}>
+      <Field
+        label={`Sign-in password for ${user.name}`}
+        hint={`At least ${MIN_PASSWORD_LENGTH} characters. They sign in with ${user.email}. Any open sessions are signed out.`}
+        error={error}
+      >
+        <input
+          type="password"
+          autoComplete="new-password"
+          autoFocus
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          required
+          minLength={MIN_PASSWORD_LENGTH}
+        />
+      </Field>
+      <button type="submit" className="btn btn-primary" disabled={saving}>
+        {saving ? 'Saving…' : 'Set password'}
+      </button>
+    </form>
   );
 }

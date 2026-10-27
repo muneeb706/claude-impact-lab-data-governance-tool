@@ -40,6 +40,7 @@ const UNIQUE_VIOLATIONS: Record<string, ApiError> = {
   'users.email': { error: 'A user with this email already exists', field: 'email' },
   'managers.email': { error: 'An account manager with this email already exists', field: 'email' },
   'policies.code': { error: 'A policy with this code already exists', field: 'code' },
+  'datasets.account_id, datasets.name': { error: 'This account already has a dataset with that name', field: 'name' },
   'roles.name, roles.account_type': {
     error: 'A role with this name already exists for this account type',
     field: 'name',
@@ -62,6 +63,9 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
     const known = UNIQUE_VIOLATIONS[columns];
     status = 409;
     body = known ?? { error: 'A record with that value already exists' };
+  } else if (err?.type === 'entity.too.large') {
+    status = 413;
+    body = { error: 'The upload is too large' };
   } else if (err?.type === 'entity.parse.failed') {
     status = 400;
     body = { error: 'Malformed JSON body' };

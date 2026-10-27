@@ -21,7 +21,7 @@ export default function LoginPage({ needsSetup }: { needsSetup: boolean }) {
           </svg>
           <div>
             <div className="brand-name">Data Governance</div>
-            <div className="brand-sub">Account manager console</div>
+            <div className="brand-sub">Protecting proprietary scientific data</div>
           </div>
         </div>
         {needsSetup ? <SetupForm /> : <SignInForm />}
@@ -31,7 +31,7 @@ export default function LoginPage({ needsSetup }: { needsSetup: boolean }) {
 }
 
 function SignInForm() {
-  const { signedIn } = useAuth();
+  const { refresh } = useAuth();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<FormError>(null);
@@ -42,7 +42,8 @@ function SignInForm() {
     setBusy(true);
     setError(null);
     try {
-      signedIn(await api.post<Manager>('/auth/login', { email, password }));
+      await api.post('/auth/login', { email, password });
+      await refresh();
     } catch (err) {
       setError(toFormError(err));
       setBusy(false);
@@ -68,7 +69,9 @@ function SignInForm() {
       <button type="submit" className="btn btn-primary btn-block" disabled={busy}>
         {busy ? 'Signing in…' : 'Sign in'}
       </button>
-      <p className="muted auth-footnote">Forgot your password? Ask another account manager to reset it.</p>
+      <p className="muted auth-footnote">
+        Account managers and account members both sign in here. Forgot your password? Ask an account manager to reset it.
+      </p>
     </form>
   );
 }

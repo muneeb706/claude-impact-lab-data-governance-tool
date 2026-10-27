@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import type { Request, RequestHandler, Response } from 'express';
-import type { Manager } from '../../shared/types';
+import type { Manager, MemberSession } from '../../shared/types';
 import type { DB } from './db';
 
 export const SESSION_COOKIE = 'dg_session';
@@ -31,26 +31,60 @@ export async function verifyPassword(password: string, stored: string): Promise<
 
 // Compared against when an email is unknown, so response time doesn't reveal which emails exist.
 const dummyHash = hashPassword(crypto.randomBytes(16).toString('hex'));
-export async function verifyPasswordOrDummy(password: string, stored: string | undefined): Promise<boolean> {
+export async function verifyPasswordOrDummy(password: string, stored: string | null | undefined): Promise<boolean> {
   const ok = await verifyPassword(password, stored ?? (await dummyHash));
-  return ok && stored !== undefined;
+  return ok && Boolean(stored);
+}
+
+// ---------- Who is signed in ----------
+
+/** Someone signed in to the console: an account manager, or a member of an account. */
+export type Principal = { kind: 'manager'; manager: Manager } | { kind: 'member'; member: MemberSession };
+
+/** The identity written to the audit log. */
+export interface AuditActor {
+  kind: 'manager' | 'member';
+  id: number;
+  name: string;
+  email: string;
+}
+
+export const SELECT_MANAGER = `
+  SELECT m.id, m.name, m.email, m.status, m.created_at AS createdAt FROM managers m
+`;
+
+export function getMemberSession(db: DB, userId: number): MemberSession | undefined {
+  const row = db
+    .prepare(
+      `SELECT u.id, u.name, u.email, u.account_id AS accountId, a.name AS accountName, a.type AS accountType,
+              u.role_id AS roleId, r.name AS roleName,
+              (SELECT GROUP_CONCAT(p.code) FROM role_policies rp JOIN policies p ON p.id = rp.policy_id
+               WHERE rp.role_id = u.role_id) AS policyCodes
+       FROM users u JOIN accounts a ON a.id = u.account_id JOIN roles r ON r.id = u.role_id
+       WHERE u.id = ? AND u.status = 'active' AND u.password_hash IS NOT NULL`,
+    )
+    .get(userId) as (Omit<MemberSession, 'policyCodes'> & { policyCodes: string | null }) | undefined;
+  if (!row) return undefined;
+  return { ...row, policyCodes: row.policyCodes ? row.policyCodes.split(',').sort() : [] };
 }
 
 // ---------- Sessions ----------
 
 const hashToken = (token: string) => crypto.createHash('sha256').update(token).digest('hex');
 
-export const SELECT_MANAGER = `
-  SELECT m.id, m.name, m.email, m.status, m.created_at AS createdAt FROM managers m
-`;
-
-export function startSession(db: DB, req: Request, res: Response, managerId: number): void {
+export function startSession(
+  db: DB,
+  req: Request,
+  res: Response,
+  owner: { managerId: number } | { userId: number },
+): void {
   const token = crypto.randomBytes(32).toString('base64url');
   const expiresAt = new Date(Date.now() + SESSION_TTL_MS);
   db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(new Date().toISOString());
-  db.prepare('INSERT INTO sessions (token_hash, manager_id, expires_at) VALUES (?, ?, ?)').run(
+  db.prepare('INSERT INTO sessions (token_hash, manager_id, user_id, expires_at) VALUES (?, ?, ?, ?)').run(
     hashToken(token),
-    managerId,
+    'managerId' in owner ? owner.managerId : null,
+    'userId' in owner ? owner.userId : null,
     expiresAt.toISOString(),
   );
   res.cookie(SESSION_COOKIE, token, {
@@ -68,13 +102,12 @@ export function endSession(db: DB, req: Request, res: Response): void {
   res.clearCookie(SESSION_COOKIE, { path: '/' });
 }
 
-/** Signs a manager out everywhere, optionally keeping the session making this request. */
-export function revokeSessions(db: DB, managerId: number, keep?: Request): void {
+/** Signs someone out everywhere, optionally keeping the session making this request. */
+export function revokeSessions(db: DB, owner: { managerId: number } | { userId: number }, keep?: Request): void {
   const token = keep && readSessionToken(keep);
-  db.prepare('DELETE FROM sessions WHERE manager_id = ? AND token_hash IS NOT ?').run(
-    managerId,
-    token ? hashToken(token) : null,
-  );
+  const column = 'managerId' in owner ? 'manager_id' : 'user_id';
+  const id = 'managerId' in owner ? owner.managerId : owner.userId;
+  db.prepare(`DELETE FROM sessions WHERE ${column} = ? AND token_hash IS NOT ?`).run(id, token ? hashToken(token) : null);
 }
 
 function readSessionToken(req: Request): string | undefined {
@@ -85,32 +118,91 @@ function readSessionToken(req: Request): string | undefined {
   return undefined;
 }
 
-export function sessionManager(db: DB, req: Request): Manager | undefined {
+export function sessionPrincipal(db: DB, req: Request): Principal | undefined {
   const token = readSessionToken(req);
   if (!token) return undefined;
-  return db
-    .prepare(
-      `${SELECT_MANAGER} JOIN sessions s ON s.manager_id = m.id
-       WHERE s.token_hash = ? AND s.expires_at > ? AND m.status = 'active'`,
-    )
-    .get(hashToken(token), new Date().toISOString()) as Manager | undefined;
+  const session = db
+    .prepare('SELECT manager_id AS managerId, user_id AS userId FROM sessions WHERE token_hash = ? AND expires_at > ?')
+    .get(hashToken(token), new Date().toISOString()) as { managerId: number | null; userId: number | null } | undefined;
+  if (!session) return undefined;
+
+  if (session.managerId !== null) {
+    const manager = db.prepare(`${SELECT_MANAGER} WHERE m.id = ? AND m.status = 'active'`).get(session.managerId) as
+      | Manager
+      | undefined;
+    return manager && { kind: 'manager', manager };
+  }
+  const member = getMemberSession(db, session.userId!);
+  return member && { kind: 'member', member };
 }
 
 export function requireManager(db: DB): RequestHandler {
   return (req, res, next) => {
-    const manager = sessionManager(db, req);
-    if (!manager) {
+    const principal = sessionPrincipal(db, req);
+    if (!principal) {
       res.status(401).json({ error: 'Sign in to continue' });
       return;
     }
-    res.locals.manager = manager;
+    if (principal.kind !== 'manager') {
+      res.status(403).json({ error: 'Only account managers can do this' });
+      return;
+    }
+    res.locals.principal = principal;
+    next();
+  };
+}
+
+/** Requires a signed-in member whose role grants at least one of `anyOf` (or any member if empty). */
+export function requireMember(db: DB, ...anyOf: string[]): RequestHandler {
+  return (req, res, next) => {
+    const principal = sessionPrincipal(db, req);
+    if (!principal) {
+      res.status(401).json({ error: 'Sign in to continue' });
+      return;
+    }
+    if (principal.kind !== 'member') {
+      res.status(403).json({ error: 'Only account members can do this' });
+      return;
+    }
+    if (anyOf.length > 0 && !anyOf.some((code) => principal.member.policyCodes.includes(code))) {
+      res.status(403).json({ error: 'Your role does not allow this' });
+      return;
+    }
+    res.locals.principal = principal;
     next();
   };
 }
 
 /** The signed-in manager making this request. Only valid behind requireManager. */
-export function actorOf(res: Response): Manager {
-  const manager = res.locals.manager as Manager | undefined;
-  if (!manager) throw new Error('actorOf called without requireManager');
-  return manager;
+export function actorOf(res: Response): AuditActor {
+  const principal = res.locals.principal as Principal | undefined;
+  if (principal?.kind !== 'manager') throw new Error('actorOf called without requireManager');
+  return { kind: 'manager', id: principal.manager.id, name: principal.manager.name, email: principal.manager.email };
+}
+
+/** The signed-in member making this request. Only valid behind requireMember. */
+export function memberOf(res: Response): MemberSession {
+  const principal = res.locals.principal as Principal | undefined;
+  if (principal?.kind !== 'member') throw new Error('memberOf called without requireMember');
+  return principal.member;
+}
+
+export const memberActor = (member: MemberSession): AuditActor => ({
+  kind: 'member',
+  id: member.id,
+  name: member.name,
+  email: member.email,
+});
+
+/** The signed-in principal, for routes open to both managers and members. */
+export function requireSignedIn(db: DB): RequestHandler {
+  return (req, res, next) => {
+    const principal = sessionPrincipal(db, req);
+    if (!principal) {
+      res.status(401).json({ error: 'Sign in to continue' });
+      return;
+    }
+    res.locals.principal = principal;
+    next();
+  };
 }

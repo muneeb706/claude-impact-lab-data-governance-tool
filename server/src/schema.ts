@@ -89,4 +89,65 @@ export const MIGRATIONS: string[] = [
   CREATE INDEX audit_log_created_at ON audit_log(created_at);
   CREATE INDEX audit_log_actor_id ON audit_log(actor_id);
   `,
+  // 2: member sign-in, CSV datasets with file and column policies, dataset grants
+  `
+  ALTER TABLE users ADD COLUMN password_hash TEXT;
+
+  -- Sessions now belong to either a manager or a member. Existing sessions are dropped (everyone signs in again).
+  DROP TABLE sessions;
+  CREATE TABLE sessions (
+    token_hash TEXT PRIMARY KEY,
+    manager_id INTEGER REFERENCES managers(id) ON DELETE CASCADE,
+    user_id    INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    expires_at TEXT NOT NULL,
+    CHECK ((manager_id IS NULL) <> (user_id IS NULL))
+  );
+  CREATE INDEX sessions_manager_id ON sessions(manager_id);
+  CREATE INDEX sessions_user_id ON sessions(user_id);
+
+  ALTER TABLE audit_log ADD COLUMN actor_kind TEXT NOT NULL DEFAULT 'manager' CHECK (actor_kind IN ('manager', 'member'));
+  ALTER TABLE audit_log ADD COLUMN actor_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
+
+  -- A CSV file owned by an account. The file-level policy is data_tier + claude_access.
+  CREATE TABLE datasets (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id   INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    name         TEXT NOT NULL,
+    description  TEXT NOT NULL DEFAULT '',
+    file_name    TEXT NOT NULL,
+    content      TEXT NOT NULL,
+    sha256       TEXT NOT NULL,
+    row_count    INTEGER NOT NULL,
+    byte_size    INTEGER NOT NULL,
+    data_tier    TEXT NOT NULL DEFAULT 'internal' CHECK (data_tier IN ('public', 'internal', 'restricted')),
+    claude_access TEXT NOT NULL DEFAULT 'allowed' CHECK (claude_access IN ('allowed', 'blocked')),
+    -- Secret used to pseudonymize masked columns consistently within this dataset.
+    mask_key     TEXT NOT NULL,
+    uploaded_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    UNIQUE (account_id, name)
+  );
+
+  -- Column-level policy: who can see the column (classification) and what Claude Code gets.
+  CREATE TABLE dataset_columns (
+    dataset_id     INTEGER NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
+    position       INTEGER NOT NULL,
+    name           TEXT NOT NULL,
+    classification TEXT NOT NULL CHECK (classification IN ('public', 'internal', 'restricted')),
+    claude_access  TEXT NOT NULL DEFAULT 'allowed' CHECK (claude_access IN ('allowed', 'masked', 'blocked')),
+    description    TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (dataset_id, position)
+  );
+
+  CREATE TABLE dataset_grants (
+    dataset_id INTEGER NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    granted_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (dataset_id, user_id)
+  );
+  CREATE INDEX dataset_grants_user_id ON dataset_grants(user_id);
+  `,
 ];

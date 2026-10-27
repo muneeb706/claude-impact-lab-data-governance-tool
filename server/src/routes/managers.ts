@@ -74,7 +74,7 @@ export function managersRouter(db: DB): Router {
         ).run({ id, name: input.name ?? null, status: input.status ?? null, passwordHash });
 
         const deactivated = input.status === 'deactivated' && before.status !== 'deactivated';
-        if (deactivated || passwordHash) revokeSessions(db, id);
+        if (deactivated || passwordHash) revokeSessions(db, { managerId: id });
 
         const log = (action: string, summary: string, details?: Record<string, unknown>) =>
           recordAudit(db, actor, { action, entityType: 'manager', entityId: id, summary, details });

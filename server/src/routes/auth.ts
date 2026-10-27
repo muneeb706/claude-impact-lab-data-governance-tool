@@ -3,16 +3,18 @@ import { z } from 'zod';
 import type { Manager, SessionInfo } from '../../../shared/types';
 import { recordAudit } from '../audit';
 import {
-  actorOf,
   endSession,
+  getMemberSession,
   hashPassword,
-  requireManager,
+  requireSignedIn,
   revokeSessions,
   SELECT_MANAGER,
-  sessionManager,
+  sessionPrincipal,
   startSession,
   verifyPassword,
   verifyPasswordOrDummy,
+  type AuditActor,
+  type Principal,
 } from '../auth';
 import type { DB } from '../db';
 import { asyncHandler, emailSchema, HttpError, nameSchema, passwordSchema } from '../http';
@@ -31,11 +33,18 @@ const changePasswordSchema = z.object({
 
 const managerCount = (db: DB) => (db.prepare('SELECT COUNT(*) AS n FROM managers').get() as { n: number }).n;
 
+type Credentials = { id: number; status: string; passwordHash: string | null };
+
 export function authRouter(db: DB): Router {
   const router = Router();
 
   router.get('/session', (req, res) => {
-    res.json({ manager: sessionManager(db, req) ?? null, needsSetup: managerCount(db) === 0 } satisfies SessionInfo);
+    const principal = sessionPrincipal(db, req);
+    res.json({
+      manager: principal?.kind === 'manager' ? principal.manager : null,
+      member: principal?.kind === 'member' ? principal.member : null,
+      needsSetup: managerCount(db) === 0,
+    } satisfies SessionInfo);
   });
 
   // First run only: creates the first account manager and signs them in.
@@ -50,7 +59,7 @@ export function authRouter(db: DB): Router {
           .prepare('INSERT INTO managers (name, email, password_hash) VALUES (?, ?, ?)')
           .run(input.name, input.email, passwordHash);
         const created = db.prepare(`${SELECT_MANAGER} WHERE m.id = ?`).get(lastInsertRowid) as Manager;
-        recordAudit(db, created, {
+        recordAudit(db, { kind: 'manager', ...created }, {
           action: 'manager.created',
           entityType: 'manager',
           entityId: created.id,
@@ -59,24 +68,37 @@ export function authRouter(db: DB): Router {
         });
         return created;
       })();
-      startSession(db, req, res, manager.id);
+      startSession(db, req, res, { managerId: manager.id });
       res.status(201).json(manager);
     }),
   );
 
+  // One sign-in form for everyone: account managers first, then account members.
   router.post(
     '/login',
     asyncHandler(async (req, res) => {
       const { email, password } = signInSchema.parse(req.body);
-      const row = db.prepare('SELECT id, status, password_hash AS passwordHash FROM managers WHERE email = ?').get(email) as
-        | { id: number; status: string; passwordHash: string }
-        | undefined;
-      if (!(await verifyPasswordOrDummy(password, row?.passwordHash))) {
-        throw new HttpError(401, 'Incorrect email or password');
+      const manager = db
+        .prepare('SELECT id, status, password_hash AS passwordHash FROM managers WHERE email = ?')
+        .get(email) as Credentials | undefined;
+      const member = db
+        .prepare('SELECT id, status, password_hash AS passwordHash FROM users WHERE email = ?')
+        .get(email) as Credentials | undefined;
+
+      if (await verifyPasswordOrDummy(password, manager?.passwordHash)) {
+        if (manager!.status !== 'active') throw new HttpError(403, 'This account manager has been deactivated');
+        startSession(db, req, res, { managerId: manager!.id });
+        res.json({ kind: 'manager' });
+        return;
       }
-      if (row!.status !== 'active') throw new HttpError(403, 'This account manager has been deactivated');
-      startSession(db, req, res, row!.id);
-      res.json(db.prepare(`${SELECT_MANAGER} WHERE m.id = ?`).get(row!.id));
+      if (await verifyPasswordOrDummy(password, member?.passwordHash)) {
+        if (member!.status !== 'active') throw new HttpError(403, 'Your access has been suspended');
+        if (!getMemberSession(db, member!.id)) throw new HttpError(403, 'Your access has been suspended');
+        startSession(db, req, res, { userId: member!.id });
+        res.json({ kind: 'member' });
+        return;
+      }
+      throw new HttpError(401, 'Incorrect email or password');
     }),
   );
 
@@ -88,25 +110,30 @@ export function authRouter(db: DB): Router {
   // Changing your password signs you out of every other session.
   router.post(
     '/password',
-    requireManager(db),
+    requireSignedIn(db),
     asyncHandler(async (req, res) => {
-      const actor = actorOf(res);
+      const principal = res.locals.principal as Principal;
       const input = changePasswordSchema.parse(req.body);
-      const { passwordHash } = db.prepare('SELECT password_hash AS passwordHash FROM managers WHERE id = ?').get(actor.id) as {
+      const isManager = principal.kind === 'manager';
+      const self = isManager ? principal.manager : principal.member;
+      const table = isManager ? 'managers' : 'users';
+
+      const { passwordHash } = db.prepare(`SELECT password_hash AS passwordHash FROM ${table} WHERE id = ?`).get(self.id) as {
         passwordHash: string;
       };
       if (!(await verifyPassword(input.currentPassword, passwordHash))) {
         throw new HttpError(400, 'Current password is incorrect', 'currentPassword');
       }
       const newHash = await hashPassword(input.newPassword);
+      const actor: AuditActor = { kind: principal.kind, id: self.id, name: self.name, email: self.email };
       db.transaction(() => {
-        db.prepare('UPDATE managers SET password_hash = ? WHERE id = ?').run(newHash, actor.id);
-        revokeSessions(db, actor.id, req);
+        db.prepare(`UPDATE ${table} SET password_hash = ? WHERE id = ?`).run(newHash, self.id);
+        revokeSessions(db, isManager ? { managerId: self.id } : { userId: self.id }, req);
         recordAudit(db, actor, {
-          action: 'manager.password_changed',
-          entityType: 'manager',
-          entityId: actor.id,
-          summary: `${actor.name} changed their password`,
+          action: isManager ? 'manager.password_changed' : 'user.password_changed',
+          entityType: isManager ? 'manager' : 'user',
+          entityId: self.id,
+          summary: `${self.name} changed their password`,
         });
       })();
       res.status(204).end();

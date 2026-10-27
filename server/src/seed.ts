@@ -47,6 +47,15 @@ export const POLICY_CATALOG: PolicySeed[] = [
     risk: 'high',
   },
   {
+    code: 'data.steward',
+    name: 'Steward datasets',
+    description:
+      'Upload CSV datasets, set file and column policies including what Claude Code may read, and grant members access.',
+    category: 'Data access',
+    dataTier: null,
+    risk: 'high',
+  },
+  {
     code: 'data.classify',
     name: 'Classify data tiers',
     description: 'Assign or change the public / internal / restricted tier of documents and datasets.',
@@ -109,6 +118,15 @@ export const POLICY_CATALOG: PolicySeed[] = [
     risk: 'low',
   },
   {
+    code: 'data.download',
+    name: 'Download granted datasets',
+    description:
+      'Download datasets a data steward has granted, packaged with their policy and Claude Code guardrails.',
+    category: 'Sharing & export',
+    dataTier: 'internal',
+    risk: 'medium',
+  },
+  {
     code: 'share.raw_export',
     name: 'Export raw data',
     description: 'Download or export raw records, structures or sequences.',
@@ -160,9 +178,28 @@ export const POLICY_CATALOG: PolicySeed[] = [
   },
 ];
 
-// Built-in starting roles: one for academic accounts, one for industry.
-// Policies are only assigned when the role is first created, so later edits
-// by the account manager are preserved across restarts.
+const DATA_STEWARD_POLICIES = [
+  'data.public.read',
+  'data.internal.read',
+  'data.restricted.read',
+  'data.classify',
+  'data.steward',
+  'gov.audit.view',
+];
+
+// Can see restricted data themselves, but their role doesn't allow sending it to cloud AI.
+const RESEARCH_SCIENTIST_POLICIES = [
+  'data.public.read',
+  'data.internal.read',
+  'data.restricted.read',
+  'data.download',
+  'ai.cloud.public',
+  'ai.cloud.internal_scrubbed',
+  'ai.claude_code.repo',
+];
+
+// Built-in starting roles. Policies are only assigned when a role is first
+// created, so later edits by the account manager are preserved across restarts.
 export const SYSTEM_ROLES: RoleSeed[] = [
   {
     name: 'Principal Investigator',
@@ -204,6 +241,21 @@ export const SYSTEM_ROLES: RoleSeed[] = [
       'gov.exceptions.approve',
     ],
   },
+  ...(['academic', 'industry'] as const).flatMap((accountType): RoleSeed[] => [
+    {
+      name: 'Data Steward',
+      accountType,
+      description:
+        "Owns the account's datasets: classifies files and columns, decides what Claude Code may read, and grants access.",
+      policyCodes: DATA_STEWARD_POLICIES,
+    },
+    {
+      name: 'Research Scientist',
+      accountType,
+      description: 'Downloads datasets a data steward has granted and analyzes them, including with Claude Code.',
+      policyCodes: RESEARCH_SCIENTIST_POLICIES,
+    },
+  ]),
 ];
 
 export function seed(db: Database.Database): void {

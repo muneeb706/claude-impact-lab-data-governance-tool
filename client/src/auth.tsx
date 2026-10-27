@@ -1,11 +1,12 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
-import type { Manager, SessionInfo } from '../../shared/types';
+import type { Manager, MemberSession, SessionInfo } from '../../shared/types';
 import { api, AUTH_REQUIRED_EVENT, errorMessage } from './api';
 
 interface AuthContextValue {
   /** null while the session is loading. */
   session: SessionInfo | null;
   error: string | null;
+  /** Call after setup creates the first manager. */
   signedIn: (manager: Manager) => void;
   signOut: () => Promise<void>;
   refresh: () => Promise<void>;
@@ -31,7 +32,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [refresh]);
 
   useEffect(() => {
-    const onAuthRequired = () => setSession((s) => (s ? { ...s, manager: null } : s));
+    const onAuthRequired = () => setSession((s) => (s ? { ...s, manager: null, member: null } : s));
     window.addEventListener(AUTH_REQUIRED_EVENT, onAuthRequired);
     return () => window.removeEventListener(AUTH_REQUIRED_EVENT, onAuthRequired);
   }, []);
@@ -41,10 +42,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       session,
       error,
       refresh,
-      signedIn: (manager) => setSession({ manager, needsSetup: false }),
+      signedIn: (manager) => setSession({ manager, member: null, needsSetup: false }),
       signOut: async () => {
         await api.post('/auth/logout', {});
-        setSession({ manager: null, needsSetup: false });
+        setSession({ manager: null, member: null, needsSetup: false });
       },
     }),
     [session, error, refresh],
@@ -59,9 +60,18 @@ export function useAuth(): AuthContextValue {
   return value;
 }
 
-/** The signed-in manager. Only use inside the signed-in app shell. */
+/** The signed-in manager. Only use inside the manager app shell. */
 export function useManager(): Manager {
   const manager = useAuth().session?.manager;
   if (!manager) throw new Error('useManager used while signed out');
   return manager;
 }
+
+/** The signed-in account member. Only use inside the member app shell. */
+export function useMember(): MemberSession {
+  const member = useAuth().session?.member;
+  if (!member) throw new Error('useMember used while signed out');
+  return member;
+}
+
+export const hasPolicy = (member: MemberSession, code: string) => member.policyCodes.includes(code);
